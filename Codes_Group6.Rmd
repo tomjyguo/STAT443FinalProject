@@ -1,0 +1,488 @@
+---
+title: "Codes_Group6"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+## Loading in data set
+data=read.csv("Data_Group6.csv")
+
+## Removing everything before 2003 due to missing data
+data <-data[data$YEAR >= 2003,]
+ts_data <- ts(data$TOTAL.PATIENTS, start = c(2003, 1), frequency = 52)
+plot(ts_data, main = "Total Patients Time Series",
+     ylab = "Total Patients", xlab = "Time")
+
+## Regression models
+library(MASS)
+X <- time(ts_data)
+Y <- data$TOTAL.PATIENTS
+
+boxcox_mod <- boxcox(ts_data~1)
+optimal.lambda = boxcox_mod$x[which.max(boxcox_mod$y)]
+optimal.lambda
+dat_trans <- (ts_data^optimal.lambda)
+plot(dat_trans, main = "Transformed Data")
+
+poly.time = poly(as.vector(X), 7)
+test_set<-window(ts_data, start=c(2023,1))
+train_set<-window(ts_data,start=c(2003,1),end=c(2022,52))
+
+train_trans <- (train_set^optimal.lambda)
+
+ASE = c()
+for (deg in 1:7){
+  season <- as.factor(cycle(train_set))
+  model <- lm(train_trans~poly.time[1:1040, 1:deg]+season)
+  time.test <- poly.time[1041:1138, 1: deg]
+  season.test <- as.factor(cycle(test_set))
+  modelmatrix <- model.matrix(test_set~time.test+season.test)
+  pred.trans = coef(model) %*% t(modelmatrix)
+  pred = pred.trans^(optimal.lambda)
+  ASE[deg] = mean(abs(as.vector(test_set)-pred))
+}
+
+plot(1:7, ASE, xlab="Polynomial Degree", ylab="Prediction ASE")
+
+min_loss<- which.min(ASE)
+
+tim<- time(dat_trans)
+mon<- as.factor(cycle(dat_trans))
+model_1 <- lm(dat_trans~poly(tim, 4)+mon)
+pred <- predict(model_1, newdata=data.frame(tim_train=time(dat_trans),month_train = as.factor(cycle(dat_trans))))
+
+plot(ts_data, main ="Actual vs Fitted Time Series", ylim=c(0, 4000000))
+points(time(ts_data), pred^(1/optimal.lambda), type ="l", col="red")
+legend(x="topleft", legend=c("actual","fitted"), col=c("black", "red"), lty=c(1,1))
+
+ASE_reg = mean(abs(as.vector(ts_data)-pred))
+ASE_reg
+
+tim.new =seq(2024+42/52, 2024+42/53+51/52, length = 52)
+week.new = factor(c(43:52, 1:42))
+pred_1<- predict(model_1, newdata= data.frame(tim=tim.new, mon=week.new), interval="prediction", level=0.95)
+pred_val <- pred_1^(1/optimal.lambda)
+
+plot(ts_data, main ="Actual vs Fitted Regression Time Series", 
+     ylim=c(0,5200000), xlim=c(2003,2026), 
+     ylab = "Total Patients")
+points(time(ts_data), pred^(1/optimal.lambda), type ="l", col="red")
+points(tim.new, pred_val[, "fit"], col ="red",type="l", lty=2)
+points(tim.new, pred_val[, "upr"], col ="blue",type="l", lty=2)
+points(tim.new, pred_val[, "lwr"], col ="blue", type="l",lty=2)
+legend(x="topleft", legend=c("Actual","Fitted","Predicted", "CI"), col=c("black", "red","red", "blue"), lty=c(1,1,2,2))
+
+residuals <- ts_data - pred^(1/optimal.lambda)
+plot(pred^(1/optimal.lambda), residuals, 
+     main = "Residuals vs Fitted Values",
+     xlab = "Fitted Values", ylab = "Residuals")
+abline(h = 0, col = "red")
+
+par(mfrow = c(2,2))
+plot(model_1$fitted, model_1$residuals, xlab="Fitted", ylab="Residuals")
+abline(h=0, lty=2, col="red")
+
+car::qqPlot(model_1$residuals, col=adjustcolor("black", 0.7), xlab="Theoretical Quantiles", ylab="Residual Quantiles", main="Normal Q-Q Plot", id= FALSE)
+
+plot(model_1$residuals, xlab="Time", ylab="Residuals", main="Time vs. Residuals")
+abline(h=0, lty=2, col="red")
+acf(model_1$residuals, main="Sample ACF of Residuals")
+```
+
+```{r}
+## Shrinkage models
+library(glmnet)
+alphas <- c(0, 0.25, 0.5, 0.75, 1)
+degrees <- 1:7
+
+CV_measure <- list()
+CV_lambda <- list()
+min_p <- c()
+season_total <- as.factor(cycle(ts_data))
+
+for (i in 1:5) {
+  CV_measure_alpha <- c()
+  CV_lambda_alpha <- c()
+  
+  for (deg in degrees) {
+    model <- lm(data$TOTAL.PATIENTS~poly.time[1:1138, 1:deg] + season_total)
+    ModelMatrix <- model.matrix(data$TOTAL.PATIENTS~poly.time[1:1138, 1:deg] + season_total)
+    CV = cv.glmnet(ModelMatrix, data$TOTAL.PATIENTS, alphas = alphas[i])
+    CV_measure_alpha[deg] = min(CV$cvm)
+    CV_lambda_alpha[deg] = CV$lambda.min
+  }
+  
+  CV_measure[[i]] <- CV_measure_alpha
+  CV_lambda[[i]] <- CV_lambda_alpha
+  
+  optimal_p <- which.min(CV_measure_alpha)
+  min_p[i] <- c(optimal_p)
+  
+  plot(degrees[1:7], CV_measure_alpha, type = "b", 
+       xlab = "Polynomial Degree", ylab = "Minimum Measure",
+       main = "Minimum Measure VS Polynomial Degree")
+}
+
+for (i in 1:5) {
+  alpha <- alphas[i]
+  optimal_p <- min_p[i]
+  optimal_lambda <- CV_lambda[[i]][optimal_p]
+  
+  ModelMatrix <- model.matrix(train_set~poly.time[1:1040, 1:optimal_p] + season)
+  
+  fit.ElasticNet <- glmnet(ModelMatrix, train_set, alpha = alpha, standardized = TRUE, intercept = TRUE)
+  
+  pred <- predict(fit.ElasticNet, s = optimal_lambda, newx = ModelMatrix)
+  
+  plot(c(1:1040), train_set, main = paste("Elastic Net Fit (alpha =", alpha, ")"),
+       xlab = "Time", ylab = "Total Patients", cex = 0.2)
+  
+  lines(c(1:1040), pred, col = "blue", lwd = 2)
+}
+
+ASE = c()
+for (i in 1:5) {
+  alpha <- alphas[i]
+  optimal_p <- min_p[i]
+  optimal_lambda <- CV_lambda[[i]][optimal_p]
+  
+  ModelMatrix <- model.matrix(test_set~poly.time[1:98, 1:optimal_p] + season.test)
+  
+  fit.ElasticNet <- glmnet(ModelMatrix, test_set, alpha = alpha, standardized = TRUE, intercept = TRUE)
+  
+  pred <- predict(fit.ElasticNet, s = optimal_lambda, newx = ModelMatrix)
+  ASE[i] <- mean(abs(pred - test_set))
+}
+
+ASE
+
+optimal_lambda <- CV_lambda[[2]][7]
+
+ModelMatrix <- model.matrix(data$TOTAL.PATIENTS~poly.time[1:1138, 1:7] + season_total)
+
+fit.ElasticNet <- glmnet(ModelMatrix, data$TOTAL.PATIENTS, alpha = 0.25, standardized = TRUE, intercept = TRUE)
+
+pred <- predict(fit.ElasticNet, s = optimal_lambda, newx = ModelMatrix)
+
+residuals <- data$TOTAL.PATIENTS - as.vector(pred)
+
+plot(data$TOTAL.PATIENTS, pred, main = "Observed vs Fitted Values", 
+     xlab = "Fitted Values", ylab = "Observed")
+
+plot(1:1138, residuals, main = "Residuals vs Time",
+     xlab = "Time", ylab = "Residuals")
+abline(h = 0, col = "blue")
+acf(residuals, main = "ACF of Residuals")
+
+train_set <- window(ts_data, start = c(2003, 1), end = c(2024, 42))
+
+poly.time <- poly(as.vector(time(train_set)), 7)
+season <- as.factor(cycle(train_set))
+ModelMatrix <- model.matrix(~ poly.time + season)
+
+optimal_lambda <- CV_lambda[[2]][7]
+fit.ElasticNet <- glmnet(ModelMatrix, train_set, alpha = 0.25, standardize = TRUE, intercept = TRUE)
+
+future_time <- seq(2024 + 42 / 52, 2025 + 51 / 52, by = 1 / 52)
+future_poly <- poly(future_time, 7)
+future_season <- factor(cycle(future_time), levels = unique(cycle(train_set)))
+future_model_matrix <- model.matrix(~ future_poly + future_season)
+
+predictions <- predict(fit.ElasticNet, s = optimal_lambda, newx = future_model_matrix)
+
+last_value <- as.numeric(tail(train_set, n = 1))
+adjusted_predictions <- predictions + (last_value - predictions[1])
+
+plot(ts_data, main = "Flu Patients Time Series Data Predicted With ElasticNet", ylab = "Flu Patients", xlab = "Time", xlim = c(2003, 2026), ylim = c(0, 3500000))
+lines(ts_data, col = "black")
+lines(future_time, adjusted_predictions, col = "red", lty = 1)
+legend("topleft", legend = c("Actual", "ElasticNet Prediction"), col = c("black", "red"), lty = 1, lwd = 2)
+```
+
+```{r}
+## Load data set
+data <- read.csv("Data_Group6.csv")
+
+## Removing everything before 2003 due to missing data
+data <- data[data$YEAR >= 2003, ]
+
+## Initialize time series with frequency 52 or 53, does not matter
+ts_data <- ts(data$TOTAL.PATIENTS, start = c(2003, 1), frequency = 52)
+
+## Box-Jenkins models
+## Holt-Winters algorithm and its variations
+test_set <- window(ts_data, start = c(2022, 1))
+train_set <- window(ts_data,start = c(2003, 1), end = c(2021, 1))
+
+## Exponential Smoothing
+es <- HoltWinters(train_set, gamma=FALSE, beta=FALSE)
+es.predict <- predict(es, n.ahead=146)
+ASE_es <- mean(abs(test_set-es.predict))
+
+## Double Exponential Smoothing
+des <- HoltWinters(train_set, gamma=FALSE)
+des.predict <- predict(des, n.ahead=146)
+ASE_des <- mean(abs(test_set-des.predict))
+
+## Additive Holt Winters
+add <- HoltWinters(train_set, seasonal="additive")
+add.predict <- predict(add, n.ahead=146)
+ASE_add <- mean(abs(test_set-add.predict))
+
+## Multiplicative Holt Winters
+mult <- HoltWinters(train_set, seasonal="multiplicative")
+mult.predict <- predict(mult, n.ahead=146)
+ASE_mult <- mean(abs(test_set-mult.predict))
+
+## Plotting Predicted Values
+par(mfrow = c(1, 2))
+plot(es, es.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Simple Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(des, des.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Double Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(add, add.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Addivitive Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(mult, mult.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Multiplicative Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+results <- data.frame(
+  Category = c("Simple ES", "Double ES", "Additive HS", "Multiplicative HS"),
+  Values = c(ASE_es, ASE_des, ASE_add, ASE_mult)
+)
+knitr::kable(results, colname=c("MODEL", "ASE"))
+
+par(mfrow = c(1, 1))
+acf(residuals(des), main="ACF plot for Exponential Smoothing")
+
+optimal_model <- HoltWinters(ts_data, gamma=FALSE)
+optimal_prediction <- predict(optimal_model, n.ahead=52)
+plot(optimal_model, optimal_prediction, 
+     main = "Flu Patients Time Series Data Predicted \n With Double Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+## Additive Holt Winters for Prediction
+add <- HoltWinters(ts_data, seasonal="additive")
+add.predict <- predict(add, n.ahead=52)
+
+## Multiplicative Holt Winters for Prediction
+mult <- HoltWinters(ts_data, seasonal="multiplicative")
+mult.predict <- predict(mult, n.ahead=52)
+
+plot(add, add.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Addivitive Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(mult, mult.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Multiplicative Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+```
+
+```{r}
+## Changing up the test/train sets
+test_set_precovid <- window(ts_data, start = c(2018, 1))
+train_set_precovid <- window(ts_data,start = c(2003, 1), end = c(2018, 1))
+
+## Exponential Smoothing
+es <- HoltWinters(train_set_precovid, gamma=FALSE, beta=FALSE)
+es.predict <- predict(es, n.ahead=52)
+ASE_es2 <- mean(abs(test_set_precovid-es.predict))
+
+## Double Exponential Smoothing
+des <- HoltWinters(train_set_precovid, gamma=FALSE)
+des.predict <- predict(des, n.ahead=52)
+ASE_des2 <- mean(abs(test_set_precovid-des.predict))
+
+## Additive Holt Winters
+add <- HoltWinters(train_set_precovid, seasonal="additive")
+add.predict <- predict(add, n.ahead=52)
+ASE_add2 <- mean(abs(test_set_precovid-add.predict))
+
+## Multiplicative Holt Winters
+mult <- HoltWinters(train_set_precovid, seasonal="multiplicative")
+mult.predict <- predict(mult, n.ahead=52)
+ASE_mult2 <- mean(abs(test_set_precovid-mult.predict))
+
+## Plotting Predicted Values
+par(mfrow = c(1, 2))
+plot(es, es.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Simple Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(des, des.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Double Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(add, add.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Addivitive Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(mult, mult.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Multiplicative Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+results <- data.frame(
+  Category = c("Simple ES", "Double ES", "Additive HS", "Multiplicative HS"),
+  Values = c(ASE_es2, ASE_des2, ASE_add2, ASE_mult2)
+)
+knitr::kable(results, colname=c("MODEL", "ASE"))
+
+par(mfrow = c(1, 1))
+acf(residuals(add), main="ACF plot for Exponential Smoothing")
+```
+
+```{r}
+## Changing up the test/train sets to post covid
+test_set_postcovid <- window(ts_data, start = c(2023, 1))
+train_set_postcovid <- window(ts_data,start = c(2019, 1), end = c(2023, 1))
+
+## Exponential Smoothing
+es <- HoltWinters(train_set_postcovid, gamma=FALSE, beta=FALSE)
+es.predict <- predict(es, n.ahead=52)
+ASE_es3 <- mean(abs(test_set_postcovid-es.predict))
+
+## Double Exponential Smoothing
+des <- HoltWinters(train_set_postcovid, gamma=FALSE)
+des.predict <- predict(des, n.ahead=52)
+ASE_des3 <- mean(abs(test_set_postcovid-des.predict))
+
+## Additive Holt Winters
+add <- HoltWinters(train_set_postcovid, seasonal="additive")
+add.predict <- predict(add, n.ahead=52)
+ASE_add3 <- mean(abs(test_set_postcovid-add.predict))
+
+## Multiplicative Holt Winters
+mult <- HoltWinters(train_set_postcovid, seasonal="multiplicative")
+mult.predict <- predict(mult, n.ahead=52)
+ASE_mult3 <- mean(abs(test_set_postcovid-mult.predict))
+
+## Plotting Predicted Values
+par(mfrow = c(1, 2))
+plot(es, es.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Simple Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(des, des.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Double Exponential Smoothing",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(add, add.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Addivitive Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+plot(mult, mult.predict, 
+     main = "Flu Patients Time Series Data Predicted \n With Multiplicative Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+results <- data.frame(
+  Category = c("Simple ES", "Double ES", "Additive HS", "Multiplicative HS"),
+  Values = c(ASE_es3, ASE_des3, ASE_add3, ASE_mult3)
+)
+knitr::kable(results, colname=c("MODEL", "ASE"))
+
+par(mfrow = c(1, 1))
+acf(residuals(add), main="ACF plot for Exponential Smoothing")
+```
+
+## Load Necessary Libraries
+```{r libraries}
+library(astsa)
+library(forecast)
+library(tseries)
+```
+
+## Load and Plot
+```{r load-data}
+## Loading in data
+data <- read.csv("Data_Group6.csv")
+
+## Removing everything before 2003 due to missing data
+data <- data[data$YEAR >= 2003, ]
+
+## Initialize time series with frequency 52 or 53, does not matter
+ts_data <- ts(data$TOTAL.PATIENTS, start = c(2003, 1), frequency = 52)
+
+total_patients <- ts(data$TOTAL.PATIENTS, start = c(2003, 1), frequency = 52)
+plot(total_patients, main = "Total Patients Over Time", ylab = "Patients", xlab = "Time")
+```
+
+## Check Stationarity & Differencing
+```{r stationarity}
+adf_test <- adf.test(total_patients, alternative = "stationary")
+adf_test
+
+if (adf_test$p.value > 0.05) {
+  diff_patients <- diff(total_patients)
+  plot(diff_patients, main = "Differenced Data", ylab = "Differenced Patients", xlab = "Time")
+  adf_test_diff <- adf.test(diff_patients, alternative = "stationary")
+  print(adf_test_diff)
+} else {
+  diff_patients <- total_patients
+}
+```
+
+## AMIRA
+```{r amira}
+amira_model <- auto.arima(diff_patients)
+summary(amira_model)
+
+checkresiduals(amira_model)
+
+amira_forecast <- forecast(amira_model, h = 12)
+plot(amira_forecast, main = "AMIRA Model Forecast")
+```
+
+## SAMIRA
+```{r}
+Model1 <- sarima(total_patients, p=0, d=0, q=1, P=0, D=1, Q=1, S=12, details = TRUE)
+c(Model1$AIC, Model1$AICc, Model1$BIC)
+
+Model2 <- sarima(total_patients, p=1, d=0, q=0, P=1, D=1, Q=1, S=12, details = TRUE)
+c(Model2$AIC, Model2$AICc, Model2$BIC)
+
+Model3 <- sarima(total_patients, p=1, d=0, q=1, P=0, D=1, Q=1, S=12, details = TRUE)
+c(Model3$AIC, Model3$AICc, Model3$BIC)
+
+Model4 <- sarima(total_patients, p=0, d=0, q=2, P=1, D=1, Q=0, S=12, details = TRUE)
+c(Model4$AIC, Model4$AICc, Model4$BIC)
+
+Model5 <- sarima(total_patients, p=2, d=0, q=0, P=0, D=1, Q=2, S=12, details = TRUE)
+c(Model5$AIC, Model5$AICc, Model5$BIC)
+
+best_model <- Model3
+```
+
+```{r}
+library(astsa)
+library(forecast)
+library(tseries)
+
+data <- read.csv("Data_Group6.csv")
+data <- data[data$YEAR >= 2003, ]
+ts_data <- ts(data$TOTAL.PATIENTS, start = c(2003, 1), frequency = 52)
+
+add <- HoltWinters(ts_data, seasonal="additive")
+add.predict <- predict(add, n.ahead=260)
+
+plot(add, add.predict, 
+     main = "Flu Patients Time Series Data Predicted \n 5 Years With Addivitive Holt-Winters",
+     ylab = "Flu Patients", xlab = "Time")
+
+forecast_values <- sarima.for(ts_data, p=1, d=0, q=1, P=0, D=1, Q=1, S=12, n.ahead=265)
+
+plot(ts_data, xlim = c(2003, 2025 + 5), ylim = c(0, 3000000), 
+     ylab = "Patients", main = "5-Year Forecast")
+lines(forecast_values$pred, col = "red")
+lines(forecast_values$pred + 2 * forecast_values$se, col = "blue", lty = 2)
+lines(forecast_values$pred - 2 * forecast_values$se, col = "blue", lty = 2)
+```
